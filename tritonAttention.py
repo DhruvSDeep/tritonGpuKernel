@@ -1,14 +1,15 @@
 import torch
 import triton
 import triton.language as trilang
+import math
 
 def triAttention(Q, K, V, Out,           # q,k,v and output addresses
     stride_qb, stride_qh, stride_qm, stride_qd,        # b for batch, h for head
     stride_kb, stride_kh, stride_kn, stride_kd,        # m for query seq, n for kv seq
     stride_vb, stride_vh, stride_vn, stride_vd,
     stride_ob, stride_oh, stride_om, stride_od,
-    seq_len, head_dim, sm_scale,
-    BLOCK_M: trilang.constexpr, BLOCK_N: trilang.constexpr, BLOCK_DMODEL: trilang.constexpr, causal=False):
+    seq_len, head_dim, scale,
+    BLOCK_M: trilang.constexpr, BLOCK_N: trilang.constexpr, BLOCK_DMODEL: trilang.constexpr, causal):
 
     batch_id = trilang.program_id(0)
     head_id = trilang.program_id(1)
@@ -55,7 +56,7 @@ def triAttention(Q, K, V, Out,           # q,k,v and output addresses
 
         qk = trilang.zeros([BLOCK_M, BLOCK_N], dtype=trilang.float32)         # dot prod the q and the k block
         qk += trilang.dot(q, k)
-        qk = qk * sm_scale
+        qk = qk * scale
 
         if causal:
             causal_mask = offs_m[:, None] >= (start_n_offset + offs_n)[None, :]     #create the lower triangle mask
@@ -86,3 +87,36 @@ def triAttention(Q, K, V, Out,           # q,k,v and output addresses
 
     o_ptrs = Out + o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od     #output offsetting
     trilang.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=offs_m[:, None] < seq_len)     #final storing vals
+
+def launch_triAttention(q, k, v, causal = False):
+    batch_size, num_heads, seq_len, head_dim = q.shape
+    
+    # Calculate the standard scale factor if not provided
+    scale = 1.0 / math.sqrt(head_dim)
+
+    
+    out = torch.empty_like(q)       #allocate hbm memory for output
+
+    BLOCK_M = 128                   #block sizes as 2 powers
+    BLOCK_N = 64
+
+    
+    grid = (batch_size, num_heads, triton.cdiv(seq_len, BLOCK_M))
+
+    triAttention[grid](
+        q, k, v, out,
+        # strides for Q
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        # same for K
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        # now V
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        # and output
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        # dimensions and scale
+        seq_len, head_dim, scale,
+        #constants
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_DMODEL=head_dim
+    )
+    
+    return out
