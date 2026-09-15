@@ -1,7 +1,7 @@
 import math
 import torch
 
-def attention(q, k, v):
+def torchAttention(q, k, v):
     d = q.shape[-1]
     scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d)
 
