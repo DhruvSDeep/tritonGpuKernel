@@ -8,7 +8,7 @@ def triAttention(Q, K, V, Out,           # q,k,v and output addresses
     stride_vb, stride_vh, stride_vn, stride_vd,
     stride_ob, stride_oh, stride_om, stride_od,
     seq_len, head_dim, sm_scale,
-    BLOCK_M: trilang.constexpr, BLOCK_N: trilang.constexpr, BLOCK_DMODEL: trilang.constexpr):
+    BLOCK_M: trilang.constexpr, BLOCK_N: trilang.constexpr, BLOCK_DMODEL: trilang.constexpr, causal=False):
 
     batch_id = trilang.program_id(0)
     head_id = trilang.program_id(1)
@@ -41,7 +41,11 @@ def triAttention(Q, K, V, Out,           # q,k,v and output addresses
     k_ptrs = K + k_offset + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kd   #ssame as what happened to q
     v_ptrs = V + v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd
 
-    n_blocks = -1 * (-1*seq_len // BLOCK_N)
+
+    if causal:
+        n_blocks = n_blocks = -1 * (-1*((start_m * BLOCK_M) + BLOCK_M) // BLOCK_N)          # if its causal we only iterate over the blocks of the q until now, not whole sequence
+    else:    
+        n_blocks = -1 * (-1*seq_len // BLOCK_N)     #going over the qhole sequence
 
     for start_n in range(0, n_blocks):
         start_n_offset = start_n * BLOCK_N      # this is each block of k/v
@@ -52,6 +56,10 @@ def triAttention(Q, K, V, Out,           # q,k,v and output addresses
         qk = trilang.zeros([BLOCK_M, BLOCK_N], dtype=trilang.float32)         # dot prod the q and the k block
         qk += trilang.dot(q, k)
         qk = qk * sm_scale
+
+        if causal:
+            causal_mask = offs_m[:, None] >= (start_n_offset + offs_n)[None, :]     #create the lower triangle mask
+            qk = trilang.where(causal_mask, qk, float("-inf"))          #set vals to -inf, so that exp takes them to 0
 
         m_ij = trilang.max(qk, 1)            # current max
         m_new = trilang.maximum(m_i, m_ij)   # global max
